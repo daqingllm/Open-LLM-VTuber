@@ -6,6 +6,7 @@ import numpy as np
 
 from .conversation_utils import (
     create_batch_input,
+    extract_speaker_and_content,
     process_agent_output,
     send_conversation_start_signals,
     process_user_input,
@@ -59,11 +60,20 @@ async def process_single_conversation(
             user_input, context.asr_engine, websocket_send
         )
 
+        default_speaker = (
+            metadata.get("default_speaker")
+            if isinstance(metadata, dict) and "default_speaker" in metadata
+            else context.character_config.human_name
+        )
+        speaker_name, clean_text = extract_speaker_and_content(
+            input_text, default_speaker=default_speaker
+        )
+
         # Create batch input
         batch_input = create_batch_input(
-            input_text=input_text,
+            input_text=clean_text,
             images=images,
-            from_name=context.character_config.human_name,
+            from_name=speaker_name,
             metadata=metadata,
         )
 
@@ -74,14 +84,14 @@ async def process_single_conversation(
                 conf_uid=context.character_config.conf_uid,
                 history_uid=context.history_uid,
                 role="human",
-                content=input_text,
-                name=context.character_config.human_name,
+                content=clean_text,
+                name=speaker_name,
             )
 
         if skip_history:
             logger.debug("Skipping storing user input to history (proactive speak)")
 
-        logger.info(f"User input: {input_text}")
+        logger.info(f"User input ({speaker_name}): {clean_text}")
         if images:
             logger.info(f"With {len(images)} images")
 

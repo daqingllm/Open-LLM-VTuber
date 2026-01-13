@@ -8,7 +8,7 @@ from loguru import logger
 
 
 class HistoryMessage(TypedDict):
-    role: Literal["human", "ai"]
+    role: Literal["human", "ai", "system"]
     timestamp: str
     content: str
     # Optional display information for the message
@@ -93,7 +93,7 @@ def create_new_history(conf_uid: str) -> str:
 def store_message(
     conf_uid: str,
     history_uid: str,
-    role: Literal["human", "ai"],
+    role: Literal["human", "ai", "system"],
     content: str,
     name: str | None = None,
     avatar: str | None = None,
@@ -103,7 +103,7 @@ def store_message(
     Args:
         conf_uid: Configuration unique identifier
         history_uid: History unique identifier
-        role: Message role ("human" or "ai")
+        role: Message role ("human", "ai", or "system")
         content: Message content
         name: Optional display name (default None)
         avatar: Optional avatar URL (default None)

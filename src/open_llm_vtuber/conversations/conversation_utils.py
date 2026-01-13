@@ -42,6 +42,29 @@ def create_batch_input(
     )
 
 
+def extract_speaker_and_content(
+    text: str, default_speaker: str = "Human"
+) -> tuple[str, str]:
+    stripped = text.strip() if isinstance(text, str) else ""
+    if not stripped:
+        return default_speaker, ""
+
+    match = re.match(r"^([^:\n：]{1,32})\s*[:：]\s*(.+)$", stripped)
+    if not match:
+        return default_speaker, stripped
+
+    speaker = match.group(1).strip()
+    content = match.group(2).strip()
+    if not speaker or not content:
+        return default_speaker, stripped
+
+    lowered = speaker.lower()
+    if "://" in speaker or lowered in {"http", "https"}:
+        return default_speaker, stripped
+
+    return speaker, content
+
+
 async def process_agent_output(
     output: Union[AudioOutput, SentenceOutput],
     character_config: Any,

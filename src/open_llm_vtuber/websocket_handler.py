@@ -288,6 +288,7 @@ class WebSocketHandler:
                 chat_group_manager=self.chat_group_manager,
                 client_contexts=self.client_contexts,
                 broadcast_to_group=self.broadcast_to_group,
+                force_cancel=True,
             )
 
         await handle_client_disconnect(
@@ -382,6 +383,7 @@ class WebSocketHandler:
                 chat_group_manager=self.chat_group_manager,
                 client_contexts=self.client_contexts,
                 broadcast_to_group=self.broadcast_to_group,
+                force_cancel=False,
             )
         else:
             await handle_individual_interrupt(
@@ -389,6 +391,7 @@ class WebSocketHandler:
                 current_conversation_tasks=self.current_conversation_tasks,
                 context=context,
                 heard_response=heard_response,
+                force_cancel=False,
             )
 
     async def _handle_history_list_request(

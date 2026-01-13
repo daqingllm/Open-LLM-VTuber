@@ -1,3 +1,4 @@
+import re
 from typing import (
     AsyncIterator,
     List,
@@ -14,7 +15,7 @@ from ..output_types import SentenceOutput, DisplayText
 from ..stateless_llm.stateless_llm_interface import StatelessLLMInterface
 from ..stateless_llm.claude_llm import AsyncLLM as ClaudeAsyncLLM
 from ..stateless_llm.openai_compatible_llm import AsyncLLM as OpenAICompatibleAsyncLLM
-from ...chat_history_manager import get_history
+from ...chat_history_manager import get_history, get_metadata, update_metadate
 from ..transformers import (
     sentence_divider,
     actions_extractor,
@@ -49,6 +50,11 @@ class BasicMemoryAgent(AgentInterface):
         tool_manager: Optional[ToolManager] = None,
         tool_executor: Optional[ToolExecutor] = None,
         mcp_prompt_string: str = "",
+        enable_long_term_memory: bool = True,
+        summary_trigger_messages: int = 40,
+        summary_keep_last_messages: int = 20,
+        summary_update_interval: int = 8,
+        max_memory_messages: int = 60,
     ):
         """Initialize agent with LLM and configuration."""
         super().__init__()
@@ -62,6 +68,17 @@ class BasicMemoryAgent(AgentInterface):
         self._tool_prompts = tool_prompts or {}
         self._interrupt_handled = False
         self.prompt_mode_flag = False
+
+        self._enable_long_term_memory = enable_long_term_memory
+        self._summary_trigger_messages = max(0, int(summary_trigger_messages))
+        self._summary_keep_last_messages = max(0, int(summary_keep_last_messages))
+        self._summary_update_interval = max(1, int(summary_update_interval))
+        self._max_memory_messages = max(0, int(max_memory_messages))
+
+        self._conf_uid: str | None = None
+        self._history_uid: str | None = None
+        self._long_term_summary: str = ""
+        self._turns_since_summary_update: int = 0
 
         self._tool_manager = tool_manager
         self._tool_executor = tool_executor
@@ -125,6 +142,11 @@ class BasicMemoryAgent(AgentInterface):
 
         self._system = system
 
+    def _get_effective_system_prompt(self) -> str:
+        if self._enable_long_term_memory and self._long_term_summary:
+            return f"{self._system}\n\n[Long-term memory]\n{self._long_term_summary}"
+        return self._system
+
     def _add_message(
         self,
         message: Union[str, List[Dict[str, Any]]],
@@ -175,13 +197,33 @@ class BasicMemoryAgent(AgentInterface):
 
     def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
         """Load memory from chat history."""
+        self._conf_uid = conf_uid
+        self._history_uid = history_uid
+
+        metadata = get_metadata(conf_uid, history_uid)
+        summary = metadata.get("summary") if isinstance(metadata, dict) else None
+        self._long_term_summary = summary if isinstance(summary, str) else ""
+
         messages = get_history(conf_uid, history_uid)
 
         self._memory = []
         for msg in messages:
-            role = "user" if msg["role"] == "human" else "assistant"
+            if msg["role"] == "human":
+                role = "user"
+            elif msg["role"] == "system":
+                role = "system"
+            else:
+                role = "assistant"
             content = msg["content"]
             if isinstance(content, str) and content:
+                name = msg.get("name") if isinstance(msg, dict) else None
+                if isinstance(name, str) and name.strip():
+                    prefixed = f"{name.strip()}: {content}"
+                    content = (
+                        prefixed
+                        if not content.startswith(f"{name.strip()}: ")
+                        else content
+                    )
                 self._memory.append(
                     {
                         "role": role,
@@ -190,7 +232,125 @@ class BasicMemoryAgent(AgentInterface):
                 )
             else:
                 logger.warning(f"Skipping invalid message from history: {msg}")
+
+        if (
+            self._summary_keep_last_messages
+            and len(self._memory) > self._summary_keep_last_messages
+        ):
+            self._memory = self._memory[-self._summary_keep_last_messages :]
         logger.info(f"Loaded {len(self._memory)} messages from history.")
+
+    def _format_messages_for_summary(self, messages: List[Dict[str, Any]]) -> str:
+        lines: List[str] = []
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            stripped = content.strip()
+            if role == "user":
+                speaker = "User"
+            elif role == "assistant":
+                speaker = "Assistant"
+            elif role == "system":
+                speaker = "System"
+            else:
+                speaker = str(role)
+
+            has_name_prefix = bool(re.match(r"^[\w\u4e00-\u9fff·]{1,20}:\s", stripped))
+            if has_name_prefix:
+                lines.append(stripped)
+            else:
+                lines.append(f"{speaker}: {stripped}")
+        return "\n".join(lines)
+
+    async def _update_history_summary(
+        self, messages_to_summarize: List[Dict[str, Any]]
+    ) -> None:
+        if not (self._conf_uid and self._history_uid):
+            return
+        transcript = self._format_messages_for_summary(messages_to_summarize)
+        if not transcript.strip():
+            return
+
+        system_prompt = (
+            "You maintain long-term memory for a conversational character. "
+            "Update the memory summary using the new transcript and the existing memory. "
+            "Output must be in Chinese and follow the exact template. "
+            "Only keep stable, reusable facts (preferences, names, roles, recurring topics, relationship tone). "
+            "If uncertain, mark as '待确认'. Do not include verbatim quotes. "
+            "Keep it concise (<= 900 Chinese characters)."
+        )
+
+        user_prompt = ""
+        if self._long_term_summary:
+            user_prompt += f"Existing memory summary:\n{self._long_term_summary}\n\n"
+        user_prompt += f"New transcript to integrate:\n{transcript}\n"
+        user_prompt += (
+            "\n\n"
+            "Template (keep headings and bullet style):\n"
+            "【人物卡】\n"
+            "- <姓名/称呼>: <身份/特点/偏好/雷区（待确认）>\n"
+            "【关系卡】\n"
+            "- <我与对方的关系进度/互动基调/称呼习惯/边界>\n"
+            "【进行中话题】\n"
+            "- <话题>: <当前状态/下次要聊或要做的事>\n"
+            "【表达偏好】\n"
+            "- <输出风格偏好>: <例如更口语、更简短、多追问等>\n"
+        )
+
+        summary_messages = [
+            {
+                "role": "user",
+                "content": user_prompt,
+            }
+        ]
+
+        updated_summary = ""
+        async for chunk in self._llm.chat_completion(summary_messages, system_prompt):
+            if isinstance(chunk, str):
+                updated_summary += chunk
+        updated_summary = updated_summary.strip()
+        if len(updated_summary) > 1600:
+            updated_summary = updated_summary[:1600].rstrip()
+        if not updated_summary:
+            return
+
+        update_metadate(
+            conf_uid=self._conf_uid,
+            history_uid=self._history_uid,
+            metadata={"summary": updated_summary},
+        )
+        self._long_term_summary = updated_summary
+
+    async def _post_turn_update(self) -> None:
+        if not self._enable_long_term_memory:
+            return
+        if not (self._conf_uid and self._history_uid):
+            return
+
+        self._turns_since_summary_update += 1
+        if (
+            self._summary_trigger_messages
+            and len(self._memory) < self._summary_trigger_messages
+        ):
+            return
+        if self._turns_since_summary_update < self._summary_update_interval:
+            return
+
+        self._turns_since_summary_update = 0
+
+        if not self._summary_keep_last_messages:
+            return
+        if len(self._memory) <= self._summary_keep_last_messages:
+            return
+
+        messages_to_summarize = self._memory[: -self._summary_keep_last_messages]
+        await self._update_history_summary(messages_to_summarize)
+
+        self._memory = self._memory[-self._summary_keep_last_messages :]
+        if self._max_memory_messages and len(self._memory) > self._max_memory_messages:
+            self._memory = self._memory[-self._max_memory_messages :]
 
     def handle_interrupt(self, heard_response: str) -> None:
         """Handle user interruption."""
@@ -228,11 +388,19 @@ class BasicMemoryAgent(AgentInterface):
 
         for text_data in input_data.texts:
             if text_data.source == TextSource.INPUT:
-                message_parts.append(text_data.content)
+                if text_data.from_name:
+                    message_parts.append(f"{text_data.from_name}: {text_data.content}")
+                else:
+                    message_parts.append(text_data.content)
             elif text_data.source == TextSource.CLIPBOARD:
-                message_parts.append(
-                    f"[User shared content from clipboard: {text_data.content}]"
-                )
+                if text_data.from_name:
+                    message_parts.append(
+                        f"[{text_data.from_name} shared content from clipboard: {text_data.content}]"
+                    )
+                else:
+                    message_parts.append(
+                        f"[User shared content from clipboard: {text_data.content}]"
+                    )
 
         if input_data.images:
             message_parts.append("\n[User has also provided images]")
@@ -299,7 +467,9 @@ class BasicMemoryAgent(AgentInterface):
         current_assistant_message_content = []
 
         while True:
-            stream = self._llm.chat_completion(messages, self._system, tools=tools)
+            stream = self._llm.chat_completion(
+                messages, self._get_effective_system_prompt(), tools=tools
+            )
             pending_tool_calls.clear()
             current_assistant_message_content.clear()
 
@@ -398,6 +568,7 @@ class BasicMemoryAgent(AgentInterface):
             else:
                 if current_turn_text:
                     self._add_message(current_turn_text, "assistant")
+                    await self._post_turn_update()
                 return
 
     async def _openai_tool_interaction_loop(
@@ -414,15 +585,13 @@ class BasicMemoryAgent(AgentInterface):
         while True:
             if self.prompt_mode_flag:
                 if self._mcp_prompt_string:
-                    current_system_prompt = (
-                        f"{self._system}\n\n{self._mcp_prompt_string}"
-                    )
+                    current_system_prompt = f"{self._get_effective_system_prompt()}\n\n{self._mcp_prompt_string}"
                 else:
                     logger.warning("Prompt mode active but mcp_prompt_string is empty!")
-                    current_system_prompt = self._system
+                    current_system_prompt = self._get_effective_system_prompt()
                 tools_for_api = None
             else:
-                current_system_prompt = self._system
+                current_system_prompt = self._get_effective_system_prompt()
                 tools_for_api = tools
 
             stream = self._llm.chat_completion(
@@ -576,6 +745,7 @@ class BasicMemoryAgent(AgentInterface):
             else:
                 if current_turn_text:
                     self._add_message(current_turn_text, "assistant")
+                    await self._post_turn_update()
                 return
 
     def _chat_function_factory(
@@ -643,7 +813,9 @@ class BasicMemoryAgent(AgentInterface):
                 return
             else:
                 logger.info("Starting simple chat completion.")
-                token_stream = self._llm.chat_completion(messages, self._system)
+                token_stream = self._llm.chat_completion(
+                    messages, self._get_effective_system_prompt()
+                )
                 complete_response = ""
                 async for event in token_stream:
                     text_chunk = ""
@@ -658,6 +830,7 @@ class BasicMemoryAgent(AgentInterface):
                         complete_response += text_chunk
                 if complete_response:
                     self._add_message(complete_response, "assistant")
+                    await self._post_turn_update()
 
         return chat_with_memory
 

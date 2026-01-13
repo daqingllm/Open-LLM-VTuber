@@ -34,6 +34,18 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
     use_mcpp: Optional[bool] = Field(False, alias="use_mcpp")
     mcp_enabled_servers: Optional[List[str]] = Field([], alias="mcp_enabled_servers")
 
+    enable_long_term_memory: Optional[bool] = Field(
+        True, alias="enable_long_term_memory"
+    )
+    summary_trigger_messages: Optional[int] = Field(
+        40, alias="summary_trigger_messages"
+    )
+    summary_keep_last_messages: Optional[int] = Field(
+        20, alias="summary_keep_last_messages"
+    )
+    summary_update_interval: Optional[int] = Field(8, alias="summary_update_interval")
+    max_memory_messages: Optional[int] = Field(60, alias="max_memory_messages")
+
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "llm_provider": Description(
             en="LLM provider to use for this agent",
@@ -54,6 +66,26 @@ class BasicMemoryAgentConfig(I18nMixin, BaseModel):
         "mcp_enabled_servers": Description(
             en="List of MCP servers to enable for the agent",
             zh="为智能体启用 MCP 服务器列表",
+        ),
+        "enable_long_term_memory": Description(
+            en="Enable long-term memory summary stored in chat history metadata",
+            zh="启用长期记忆摘要，并写入聊天记录元数据",
+        ),
+        "summary_trigger_messages": Description(
+            en="Start updating memory summary after this many in-memory messages",
+            zh="当内存消息数量达到该值后开始更新记忆摘要",
+        ),
+        "summary_keep_last_messages": Description(
+            en="Keep this many recent messages; summarize the rest",
+            zh="保留最近这么多条消息，其余内容写入摘要",
+        ),
+        "summary_update_interval": Description(
+            en="Update memory summary every N turns",
+            zh="每 N 轮对话更新一次记忆摘要",
+        ),
+        "max_memory_messages": Description(
+            en="Hard cap for in-memory message count",
+            zh="内存消息数量的硬上限",
         ),
     }
 

@@ -9,6 +9,7 @@ from ..agent.output_types import AudioOutput, SentenceOutput
 
 from .conversation_utils import (
     create_batch_input,
+    extract_speaker_and_content,
     process_agent_output,
     process_user_input,
     finalize_conversation_turn,
@@ -66,9 +67,6 @@ async def process_group_conversation(
             },  # Initialize memory index for each member
         )
 
-        # Initialize group conversation context for each AI
-        init_group_conversation_contexts(client_contexts)
-
         # Get human name from initiator context
         initiator_context = client_contexts.get(initiator_client_uid)
         human_name = (
@@ -76,6 +74,9 @@ async def process_group_conversation(
             if initiator_context
             else "Human"
         )
+
+        # Initialize group conversation context for each AI
+        init_group_conversation_contexts(client_contexts, human_name=human_name)
 
         # Process initial input
         input_text = await process_group_input(
@@ -85,6 +86,10 @@ async def process_group_conversation(
             broadcast_func=broadcast_func,
             group_members=group_members,
             initiator_client_uid=initiator_client_uid,
+        )
+
+        speaker_name, clean_text = extract_speaker_and_content(
+            input_text, default_speaker=human_name
         )
 
         # Check if we should skip storing this input to history
@@ -97,13 +102,13 @@ async def process_group_conversation(
                     conf_uid=member_context.character_config.conf_uid,
                     history_uid=member_context.history_uid,
                     role="human",
-                    content=input_text,
-                    name=human_name,
+                    content=clean_text,
+                    name=speaker_name,
                 )
         else:
             logger.debug("Skipping storing proactive speak input to group history")
 
-        state.conversation_history = [f"{human_name}: {input_text}"]
+        state.conversation_history = [f"{speaker_name}: {clean_text}"]
 
         is_first_responder = False
         # Main conversation loop
@@ -167,6 +172,7 @@ def init_group_conversation_state(
 
 def init_group_conversation_contexts(
     client_contexts: Dict[str, ServiceContext],
+    human_name: str,
 ) -> None:
     """Initialize group conversation context for each AI participant"""
     ai_names = [ctx.character_config.character_name for ctx in client_contexts.values()]
@@ -175,7 +181,7 @@ def init_group_conversation_contexts(
         agent = context.agent_engine
         if hasattr(agent, "start_group_conversation"):
             agent.start_group_conversation(
-                human_name="Human",
+                human_name=human_name,
                 ai_participants=[
                     name
                     for name in ai_names
@@ -249,7 +255,7 @@ async def handle_group_member_turn(
     batch_input = create_batch_input(
         input_text=new_context,
         images=images,
-        from_name="Human",
+        from_name="",
         metadata=metadata,
     )
 
