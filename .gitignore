@@ -11,8 +11,8 @@ conf.yaml
 !/live2d-models/shizuku
 
 # ignore non-default character configs
-/characters/*
-!/characters/README.md
+# /characters/*
+# !/characters/README.md
 # but all of the defaults are already tracked, so no need to un-ignore them
 
 # ignore avatars
